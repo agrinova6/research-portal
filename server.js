@@ -3,20 +3,28 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
 import dayjs from "dayjs";
+import dotenv from "dotenv";
+
+dotenv.config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Environment variables
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY; // optional, for client side maybe
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY; // server key, use this for admin actions
 const jwtSecret = process.env.JWT_SECRET;
+const port = process.env.PORT || 3000;
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// Check essential env variables
+if (!supabaseUrl) throw new Error("SUPABASE_URL is not defined");
+if (!supabaseServiceKey) throw new Error("SUPABASE_SERVICE_KEY is not defined");
+if (!jwtSecret) throw new Error("JWT_SECRET is not defined");
 
-if (!jwtSecret) {
-  throw new Error("JWT_SECRET is not defined in environment variables");
-}
+// Initialize Supabase client with service key for backend admin privileges
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 // Middleware to verify JWT and set req.user
 const verifyAuth = (req, res, next) => {
@@ -30,7 +38,7 @@ const verifyAuth = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, jwtSecret);
-    req.user = decoded; // store user info in req.user
+    req.user = decoded;
     next();
   } catch (err) {
     return res.status(401).json({ message: "Invalid or expired token" });
@@ -47,7 +55,7 @@ app.post("/api/login", async (req, res) => {
     return res.status(400).json({ message: "Email and password required" });
   }
 
-  const { data: users, error } = await supabase
+  const { data: user, error } = await supabase
     .from("profiles")
     .select("id, email, name, password")
     .eq("email", email)
@@ -57,19 +65,18 @@ app.post("/api/login", async (req, res) => {
     return res.status(500).json({ message: "Database error", error: error.message });
   }
 
-  if (!users) {
+  if (!user) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
   // WARNING: Password is stored as plain text here. In production, hash your passwords!
-
-  if (users.password !== password) {
+  if (user.password !== password) {
     return res.status(401).json({ message: "Invalid credentials" });
   }
 
   // Create JWT token
   const access_token = jwt.sign(
-    { id: users.id, email: users.email, name: users.name },
+    { id: user.id, email: user.email, name: user.name },
     jwtSecret,
     { expiresIn: "12h" }
   );
@@ -168,7 +175,6 @@ app.post("/api/log", verifyAuth, async (req, res) => {
 });
 
 // Start the server
-const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
 });
