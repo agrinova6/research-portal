@@ -1,152 +1,173 @@
 import express from "express";
 import cors from "cors";
-import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
-import multer from "multer";
-
-dotenv.config();
+import jwt from "jsonwebtoken";
+import dayjs from "dayjs";
 
 const app = express();
-
-
-app.use(cors({
- // origin: "https://your-netlify-site.netlify.app" 
-}));
-
+app.use(cors());
 app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
 
-const upload = multer({ storage: multer.memoryStorage() });
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const jwtSecret = process.env.JWT_SECRET;
 
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
+const supabase = createClient(supabaseUrl, supabaseKey);
 
-// Auth middleware
-async function verifyAuth(req, res, next) {
-  const { authorization } = req.headers;
-  if (!authorization) {
-    return res.status(401).json({ error: "No token provided" });
-  }
-  const token = authorization.split(" ")[1];
-  const { data, error } = await supabase.auth.getUser(token);
-  if (error || !data.user) {
-    return res.status(401).json({ error: "Invalid token" });
-  }
-  req.user = data.user;
-  next();
+if (!jwtSecret) {
+  throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
+// Middleware to verify JWT and set req.user
+const verifyAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
 
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Authorization header missing or invalid" });
+  }
 
-// Signup
-app.post("/api/signup", async (req, res) => {
-  const { email, password, name } = req.body;
-  const { data, error } = await supabase.auth.admin.createUser({
-    email,
-    password,
-    user_metadata: { name }
-  });
-  if (error) return res.status(400).json({ error: error.message });
-  await supabase.from("profiles").insert({ id: data.user.id, name, email });
-  res.json({ user: data.user });
-});
+  const token = authHeader.split(" ")[1];
 
-// Login
+  try {
+    const decoded = jwt.verify(token, jwtSecret);
+    req.user = decoded; // store user info in req.user
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
+};
+
+// Routes
+
+// Login Route
 app.post("/api/login", async (req, res) => {
   const { email, password } = req.body;
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) return res.status(401).json({ error: error.message });
-  res.json(data.session);
-});
 
-// Get members
-app.get("/api/members", verifyAuth, async (req, res) => {
-  const { data, error } = await supabase.from("profiles").select("id, name");
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-// Get research logs for a member
-app.get("/api/research/:memberId", verifyAuth, async (req, res) => {
-  const { memberId } = req.params;
-  const { data, error } = await supabase
-    .from("research")
-    .select("id, user_id, description, file_url")
-    .eq("user_id", memberId);
-  if (error) return res.status(500).json({ error: error.message });
-  res.json(data);
-});
-
-// Upload research (file + description)
-app.post(
-  "/api/upload",
-  verifyAuth,
-  upload.single("file"),
-  async (req, res) => {
-    const description = req.body.description;
-    const file = req.file;
-    const user = req.user;
-
-    if (req.body.user_id && req.body.user_id !== user.id) {
-      return res.status(403).json({ error: "Cannot upload to another user" });
-    }
-
-    try {
-      const filePath = `${user.id}/${Date.now()}_${file.originalname}`;
-      const { error: storageErr } = await supabase.storage
-        .from("research")
-        .upload(filePath, file.buffer, {
-          contentType: file.mimetype
-        });
-
-      if (storageErr) {
-        throw storageErr;
-      }
-
-      const { data: urlData } = supabase.storage
-        .from("research")
-        .getPublicUrl(filePath);
-
-      const { error: insertErr } = await supabase.from("research").insert([
-        {
-          user_id: user.id,
-          description,
-          file_url: urlData.publicUrl
-        }
-      ]);
-
-      if (insertErr) {
-        throw insertErr;
-      }
-
-      await supabase.from("logs").insert([
-        {
-          user_id: user.id,
-          action: `Member uploaded new research`
-        }
-      ]);
-
-      res.json({ success: true });
-    } catch (err) {
-      res.status(500).json({ error: err.message || "Upload failed" });
-    }
+  if (!email || !password) {
+    return res.status(400).json({ message: "Email and password required" });
   }
-);
 
-// Fetch logs
-app.get("/api/logs", verifyAuth, async (req, res) => {
+  const { data: users, error } = await supabase
+    .from("profiles")
+    .select("id, email, name, password")
+    .eq("email", email)
+    .single();
+
+  if (error) {
+    return res.status(500).json({ message: "Database error", error: error.message });
+  }
+
+  if (!users) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  // WARNING: Password is stored as plain text here. In production, hash your passwords!
+
+  if (users.password !== password) {
+    return res.status(401).json({ message: "Invalid credentials" });
+  }
+
+  // Create JWT token
+  const access_token = jwt.sign(
+    { id: users.id, email: users.email, name: users.name },
+    jwtSecret,
+    { expiresIn: "12h" }
+  );
+
+  res.json({ access_token });
+});
+
+// Get Members List
+app.get("/api/members", verifyAuth, async (req, res) => {
   const { data, error } = await supabase
-    .from("logs")
-    .select("user_id, action, created_at")
-    .order("created_at", { ascending: false })
-    .limit(20);
+    .from("profiles")
+    .select("id, name");
+
   if (error) return res.status(500).json({ error: error.message });
+
   res.json(data);
 });
 
-// Start server
+// Get Research Summary
+app.get("/api/research-summary", verifyAuth, async (req, res) => {
+  try {
+    const { data: profiles, error: pErr } = await supabase
+      .from("profiles")
+      .select("id, name");
+
+    if (pErr) return res.status(500).json({ error: pErr.message });
+
+    const summaries = [];
+
+    for (let prof of profiles) {
+      const today = dayjs().startOf("day");
+      const tomorrow = today.add(1, "day");
+      const yesterday = today.subtract(1, "day");
+
+      const { data: recs, error: rErr } = await supabase
+        .from("research")
+        .select("id, description, file_url, created_at")
+        .eq("user_id", prof.id)
+        .gte("created_at", yesterday.toISOString())
+        .lt("created_at", tomorrow.toISOString());
+
+      if (rErr) return res.status(500).json({ error: rErr.message });
+
+      summaries.push({
+        id: prof.id,
+        name: prof.name,
+        recs,
+      });
+    }
+
+    res.json(summaries);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Add Research Record
+app.post("/api/research", verifyAuth, async (req, res) => {
+  const { description, file_url } = req.body;
+
+  if (!description) {
+    return res.status(400).json({ message: "Description is required" });
+  }
+
+  const newResearch = {
+    description,
+    file_url: file_url || null,
+    user_id: req.user.id,
+  };
+
+  const { data, error } = await supabase.from("research").insert(newResearch).select().single();
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.status(201).json(data);
+});
+
+// Add Log Entry
+app.post("/api/log", verifyAuth, async (req, res) => {
+  const { description, user_id } = req.body;
+
+  if (!description || !user_id) {
+    return res.status(400).json({ message: "Description and user_id are required" });
+  }
+
+  const newLog = {
+    description,
+    user_id,
+  };
+
+  const { data, error } = await supabase.from("logs").insert(newLog).select().single();
+
+  if (error) return res.status(500).json({ error: error.message });
+
+  res.status(201).json(data);
+});
+
+// Start the server
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
