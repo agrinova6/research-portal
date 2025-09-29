@@ -188,6 +188,26 @@ app.post("/api/log", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+app.get("/api/research", verifyAuth, async (req, res) => {
+  try {
+    const user_id = req.query.user_id;
+    if (!user_id) {
+      return res.status(400).json({ message: "user_id query param is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("research")
+      .select("id, description, file_url, created_at")
+      .eq("user_id", user_id)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 // Start server
 const port = process.env.PORT || 3000;
