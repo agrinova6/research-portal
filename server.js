@@ -3,6 +3,9 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
 import dayjs from "dayjs";
+import multer from "multer";
+import { v4 as uuidv4 } from "uuid";
+import path from "path";
 
 const app = express();
 app.use(cors());
@@ -132,7 +135,7 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
   }
 });
 
-// Add research record
+// Add research record without file (deprecated, kept for fallback)
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
     const { description, file_url } = req.body;
@@ -156,13 +159,31 @@ app.post("/api/research", verifyAuth, async (req, res) => {
   }
 });
 
-import multer from "multer";
-import { v4 as uuidv4 } from "uuid";
-import path from "path";
-
-// Multer setup for file uploads
+// Multer setup for file uploads with memory storage and file size/type checks
 const storage = multer.memoryStorage();
-const upload = multer({ storage });
+
+// Accept only certain file types (e.g., PDFs, images, docs)
+const allowedMimeTypes = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/gif",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "text/plain"
+];
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
+  fileFilter: (req, file, cb) => {
+    if (allowedMimeTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Invalid file type. Only PDF, images, DOC, and TXT files are allowed."));
+    }
+  },
+});
 
 app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
   try {
@@ -173,7 +194,12 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
       return res.status(400).json({ message: "Description and file are required" });
     }
 
-    const fileExt = path.extname(file.originalname);
+    // Ensure file extension matches mimetype as a sanity check
+    const fileExt = path.extname(file.originalname).toLowerCase();
+    if (!fileExt) {
+      return res.status(400).json({ message: "File extension missing or invalid" });
+    }
+
     const fileName = `${uuidv4()}${fileExt}`;
     const bucket = "research-files";
 
@@ -191,14 +217,19 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
     }
 
     // Get public URL
-    const { data: publicUrlData } = supabase
+    const { data: publicUrlData, error: publicUrlError } = supabase
       .storage
       .from(bucket)
       .getPublicUrl(fileName);
 
+    if (publicUrlError) {
+      console.error("Error getting public URL:", publicUrlError);
+      return res.status(500).json({ message: "Failed to get public file URL" });
+    }
+
     const file_url = publicUrlData.publicUrl;
 
-    // Save research record
+    // Save research record with uploaded file URL
     const { data, error } = await supabase.from("research").insert({
       description,
       file_url,
@@ -219,10 +250,12 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
     res.status(201).json({ message: "Upload successful", data });
   } catch (err) {
     console.error("Upload exception:", err);
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ message: err.message });
+    }
     res.status(500).json({ message: "Server error", error: err.message });
   }
 });
-
 
 // Add log entry
 app.post("/api/log", verifyAuth, async (req, res) => {
