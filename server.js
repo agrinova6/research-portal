@@ -16,12 +16,11 @@ const jwtSecret = process.env.JWT_SECRET;
 if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
   throw new Error("SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY missing in env");
 }
-
 if (!jwtSecret) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
-// Initialize supabase client with service key (for admin tasks)
+// Supabase admin client (service role)
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
 // Expose anon key + URL for frontend
@@ -29,26 +28,27 @@ app.get("/api/anon-key", (req, res) => {
   res.json({ anonKey: supabaseAnonKey, supabaseUrl });
 });
 
-// Middleware to verify JWT
+// Middleware to verify JWT from Supabase
 const verifyAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
-
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
     return res.status(401).json({ message: "Authorization header missing or invalid" });
   }
 
   const token = authHeader.split(" ")[1];
-
   try {
+    // Verify with your JWT_SECRET (must match Supabase JWT secret!)
     const decoded = jwt.verify(token, jwtSecret);
-    req.user = decoded; // user info
+
+    // Supabase JWT stores user ID in sub claim
+    req.user = { id: decoded.sub, ...decoded };
     next();
   } catch (err) {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 };
 
-// Login route using Supabase Auth sign-in
+// Login route: use Supabase Auth REST API to sign in user and get JWT
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -57,13 +57,12 @@ app.post("/api/login", async (req, res) => {
       return res.status(400).json({ message: "Email and password required" });
     }
 
-    // Supabase sign-in via REST API (since JS SDK does not have admin signInWithPassword)
+    // Using native fetch (Node 18+ required), else use node-fetch or axios
     const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
       method: "POST",
       headers: {
-        apiKey: supabaseAnonKey,
+        "apikey": supabaseAnonKey,
         "Content-Type": "application/json",
-        Authorization: `Bearer ${supabaseServiceKey}`, // service role key for admin rights
       },
       body: JSON.stringify({ email, password }),
     });
@@ -80,21 +79,15 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Issue your own JWT token for your app (optional)
-    const access_token = jwt.sign(
-      { id: data.user.id, email: data.user.email },
-      jwtSecret,
-      { expiresIn: "12h" }
-    );
-
-    res.json({ access_token });
+    // Return access token and user info to client
+    res.json({ access_token: data.access_token, user: data.user });
   } catch (err) {
     console.error("Unexpected error in login:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 });
 
-// Get Members List
+// Get list of members (profiles)
 app.get("/api/members", verifyAuth, async (req, res) => {
   try {
     const { data, error } = await supabase.from("profiles").select("id, name");
@@ -105,19 +98,18 @@ app.get("/api/members", verifyAuth, async (req, res) => {
   }
 });
 
-// Get Research Summary
+// Get research summary for yesterday and today
 app.get("/api/research-summary", verifyAuth, async (req, res) => {
   try {
     const { data: profiles, error: pErr } = await supabase.from("profiles").select("id, name");
     if (pErr) throw pErr;
 
     const summaries = [];
+    const today = dayjs().startOf("day");
+    const tomorrow = today.add(1, "day");
+    const yesterday = today.subtract(1, "day");
 
     for (const prof of profiles) {
-      const today = dayjs().startOf("day");
-      const tomorrow = today.add(1, "day");
-      const yesterday = today.subtract(1, "day");
-
       const { data: recs, error: rErr } = await supabase
         .from("research")
         .select("id, description, file_url, created_at")
@@ -140,7 +132,7 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
   }
 });
 
-// Add Research Record
+// Add research record
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
     const { description, file_url } = req.body;
@@ -156,7 +148,6 @@ app.post("/api/research", verifyAuth, async (req, res) => {
     };
 
     const { data, error } = await supabase.from("research").insert(newResearch).select().single();
-
     if (error) throw error;
 
     res.status(201).json(data);
@@ -165,7 +156,7 @@ app.post("/api/research", verifyAuth, async (req, res) => {
   }
 });
 
-// Add Log Entry
+// Add log entry
 app.post("/api/log", verifyAuth, async (req, res) => {
   try {
     const { description, user_id } = req.body;
@@ -174,13 +165,9 @@ app.post("/api/log", verifyAuth, async (req, res) => {
       return res.status(400).json({ message: "Description and user_id are required" });
     }
 
-    const newLog = {
-      description,
-      user_id,
-    };
+    const newLog = { description, user_id };
 
     const { data, error } = await supabase.from("logs").insert(newLog).select().single();
-
     if (error) throw error;
 
     res.status(201).json(data);
@@ -188,6 +175,8 @@ app.post("/api/log", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Get all research for a specific user
 app.get("/api/research", verifyAuth, async (req, res) => {
   try {
     const user_id = req.query.user_id;
@@ -203,6 +192,18 @@ app.get("/api/research", verifyAuth, async (req, res) => {
 
     if (error) throw error;
 
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Optional: Endpoint to verify token & return current user info
+app.get("/api/me", verifyAuth, async (req, res) => {
+  try {
+    const { id } = req.user;
+    const { data, error } = await supabase.from("profiles").select("id, name, email").eq("id", id).single();
+    if (error) throw error;
     res.json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
