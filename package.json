@@ -11,6 +11,8 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.2",
     "express": "^4.21.2",
+    "jsonwebtoken": "^9.0.0",
+    "dayjs": "^1.11.9",
     "multer": "^2.0.2"
   }
 }
