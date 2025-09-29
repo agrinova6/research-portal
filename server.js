@@ -9,18 +9,24 @@ app.use(cors());
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_KEY;  // Make sure this matches your env var
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;  // NEW for frontend use
 const jwtSecret = process.env.JWT_SECRET;
 
-if (!supabaseUrl || !supabaseKey) {
-  throw new Error("SUPABASE_URL or SUPABASE_SERVICE_KEY is not defined in environment variables");
+if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
+  throw new Error("SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY missing in env");
 }
 
 if (!jwtSecret) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
-const supabase = createClient(supabaseUrl, supabaseKey);
+const supabase = createClient(supabaseUrl, supabaseServiceKey);
+
+// Expose anon key for frontend via safe route
+app.get("/api/anon-key", (req, res) => {
+  res.json({ anonKey: supabaseAnonKey, supabaseUrl });
+});
 
 // Middleware to verify JWT and set req.user
 const verifyAuth = (req, res, next) => {
