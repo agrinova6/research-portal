@@ -10,7 +10,7 @@ app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
-const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;  // NEW for frontend use
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
 const jwtSecret = process.env.JWT_SECRET;
 
 if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
@@ -21,14 +21,15 @@ if (!jwtSecret) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
 
+// Initialize supabase client with service key (for admin tasks)
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-// Expose anon key for frontend via safe route
+// Expose anon key + URL for frontend
 app.get("/api/anon-key", (req, res) => {
   res.json({ anonKey: supabaseAnonKey, supabaseUrl });
 });
 
-// Middleware to verify JWT and set req.user
+// Middleware to verify JWT
 const verifyAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -40,14 +41,14 @@ const verifyAuth = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, jwtSecret);
-    req.user = decoded; // store user info in req.user
+    req.user = decoded; // user info
     next();
   } catch (err) {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 };
 
-// Login Route
+// Login route using Supabase Auth sign-in
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -56,35 +57,39 @@ app.post("/api/login", async (req, res) => {
       return res.status(400).json({ message: "Email and password required" });
     }
 
-    const { data: user, error } = await supabase
-      .from("profiles")
-      .select("id, email, name, password")
-      .eq("email", email)
-      .single();
+    // Supabase sign-in via REST API (since JS SDK does not have admin signInWithPassword)
+    const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
+      method: "POST",
+      headers: {
+        apiKey: supabaseAnonKey,
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${supabaseServiceKey}`, // service role key for admin rights
+      },
+      body: JSON.stringify({ email, password }),
+    });
 
-    if (error) {
-      console.error("Supabase error:", error);
-      return res.status(500).json({ message: "Database error", error: error.message });
-    }
-
-    if (!user) {
+    if (!response.ok) {
+      const err = await response.json();
+      console.error("Supabase Auth error:", err);
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // WARNING: Passwords should be hashed in production!
-    if (user.password !== password) {
+    const data = await response.json();
+
+    if (!data.access_token || !data.user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    // Issue your own JWT token for your app (optional)
     const access_token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name },
+      { id: data.user.id, email: data.user.email },
       jwtSecret,
       { expiresIn: "12h" }
     );
 
     res.json({ access_token });
   } catch (err) {
-    console.error("Unexpected error:", err);
+    console.error("Unexpected error in login:", err);
     res.status(500).json({ message: "Internal server error", error: err.message });
   }
 });
@@ -184,7 +189,7 @@ app.post("/api/log", verifyAuth, async (req, res) => {
   }
 });
 
-// Start the server
+// Start server
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
