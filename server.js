@@ -3,9 +3,6 @@ import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
 import jwt from "jsonwebtoken";
 import dayjs from "dayjs";
-import multer from "multer";
-import { v4 as uuidv4 } from "uuid";
-import path from "path";
 
 const app = express();
 app.use(cors());
@@ -40,10 +37,7 @@ const verifyAuth = (req, res, next) => {
 
   const token = authHeader.split(" ")[1];
   try {
-    // Verify with your JWT_SECRET (must match Supabase JWT secret!)
     const decoded = jwt.verify(token, jwtSecret);
-
-    // Supabase JWT stores user ID in sub claim
     req.user = { id: decoded.sub, ...decoded };
     next();
   } catch (err) {
@@ -113,7 +107,7 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
     for (const prof of profiles) {
       const { data: recs, error: rErr } = await supabase
         .from("research")
-        .select("id, description, file_url, created_at")
+        .select("id, description, created_at")
         .eq("user_id", prof.id)
         .gte("created_at", yesterday.toISOString())
         .lt("created_at", tomorrow.toISOString());
@@ -133,150 +127,25 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
   }
 });
 
-// Add research record without file (deprecated fallback)
+// Upload research (text-only, no file)
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
-    const { description, file_url } = req.body;
+    const { description } = req.body;
 
-    if (!description) {
+    if (!description || description.trim() === "") {
       return res.status(400).json({ message: "Description is required" });
     }
 
     const newResearch = {
       description,
-      file_url: file_url || null,
+      file_url: null,
       user_id: req.user.id,
     };
 
     const { data, error } = await supabase.from("research").insert(newResearch).select().single();
     if (error) throw error;
 
-    res.status(201).json(data);
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Multer setup for memory storage and file validation
-const storage = multer.memoryStorage();
-
-const allowedMimeTypes = [
-  "application/pdf",
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "text/plain",
-];
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
-  fileFilter: (req, file, cb) => {
-    if (allowedMimeTypes.includes(file.mimetype)) {
-      cb(null, true);
-    } else {
-      cb(new Error("Invalid file type. Only PDF, images, DOC, and TXT files are allowed."));
-    }
-  },
-});
-
-// Updated upload route: description required, file optional
-app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
-  try {
-    const { description } = req.body;
-    const file = req.file;
-
-    if (!description || description.trim() === "") {
-      return res.status(400).json({ message: "Description is required" });
-    }
-
-    let file_url = null;
-
-    if (file) {
-      // Sanity check: file extension must exist
-      const fileExt = path.extname(file.originalname).toLowerCase();
-      if (!fileExt) {
-        return res.status(400).json({ message: "File extension missing or invalid" });
-      }
-
-      const fileName = `${uuidv4()}${fileExt}`;
-      const bucket = "research-files";
-
-      // Upload file buffer to Supabase Storage
-      const { error: uploadError } = await supabase.storage
-        .from(bucket)
-        .upload(fileName, file.buffer, {
-          contentType: file.mimetype,
-          upsert: false,
-        });
-
-      if (uploadError) {
-        console.error("Upload error:", uploadError);
-        return res.status(500).json({ message: "File upload failed" });
-      }
-
-      // Get public URL (no error object here, but check anyway)
-      const { data: publicUrlData, error: publicUrlError } = supabase.storage
-        .from(bucket)
-        .getPublicUrl(fileName);
-
-      if (publicUrlError) {
-        console.error("Error getting public URL:", publicUrlError);
-        return res.status(500).json({ message: "Failed to get public file URL" });
-      }
-
-      file_url = publicUrlData.publicUrl;
-    }
-
-    // Insert research record with or without file_url
-    const { data, error } = await supabase
-      .from("research")
-      .insert({
-        description,
-        file_url,
-        user_id: req.user.id,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("DB insert error:", error);
-      return res.status(500).json({ message: "Research insert failed" });
-    }
-
-    // Insert log entry
-    await supabase.from("logs").insert({
-      user_id: req.user.id,
-      action: `Uploaded new research: ${description}`,
-    });
-
     res.status(201).json({ message: "Upload successful", data });
-  } catch (err) {
-    console.error("Upload exception:", err);
-    if (err instanceof multer.MulterError) {
-      return res.status(400).json({ message: err.message });
-    }
-    res.status(500).json({ message: "Server error", error: err.message });
-  }
-});
-
-// Add log entry
-app.post("/api/log", verifyAuth, async (req, res) => {
-  try {
-    const { description, user_id } = req.body;
-
-    if (!description || !user_id) {
-      return res.status(400).json({ message: "Description and user_id are required" });
-    }
-
-    const newLog = { description, user_id };
-
-    const { data, error } = await supabase.from("logs").insert(newLog).select().single();
-    if (error) throw error;
-
-    res.status(201).json(data);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
@@ -308,7 +177,12 @@ app.get("/api/research", verifyAuth, async (req, res) => {
 app.get("/api/me", verifyAuth, async (req, res) => {
   try {
     const { id } = req.user;
-    const { data, error } = await supabase.from("profiles").select("id, name, email").eq("id", id).single();
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("id, name, email")
+      .eq("id", id)
+      .single();
+
     if (error) throw error;
     res.json(data);
   } catch (error) {
