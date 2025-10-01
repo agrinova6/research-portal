@@ -1,59 +1,55 @@
 import express from "express";
 import cors from "cors";
 import { createClient } from "@supabase/supabase-js";
+import jwt from "jsonwebtoken";
 import dayjs from "dayjs";
 import multer from "multer";
 import { v4 as uuidv4 } from "uuid";
 import path from "path";
 
 const app = express();
-app.use(cors({
-  origin: ['http://localhost:80', 'https://rescuevault-portal.netlify.app'],
-  credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 
-// Environment variables
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
+const jwtSecret = process.env.JWT_SECRET;
 
 if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
   throw new Error("SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY missing in env");
 }
+if (!jwtSecret) {
+  throw new Error("JWT_SECRET is not defined in environment variables");
+}
 
-// Supabase client with service key (admin)
+// Supabase admin client (service role)
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-// Middleware to verify token using Supabase auth
-const verifyAuth = async (req, res, next) => {
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    return res.status(401).json({ message: "Authorization header missing or invalid" });
-  }
-
-  const token = authHeader.split(" ")[1];
-
-  try {
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-
-    if (error || !user) {
-      return res.status(401).json({ message: "Invalid or expired token" });
-    }
-
-    req.user = user;
-    next();
-  } catch (err) {
-    console.error("Token verification failed:", err);
-    res.status(401).json({ message: "Token verification failed" });
-  }
-};
 
 // Expose anon key + URL for frontend
 app.get("/api/anon-key", (req, res) => {
   res.json({ anonKey: supabaseAnonKey, supabaseUrl });
 });
+
+// Middleware to verify JWT from Supabase
+const verifyAuth = (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Authorization header missing or invalid" });
+  }
+
+  const token = authHeader.split(" ")[1];
+  try {
+    // Verify with your JWT_SECRET (must match Supabase JWT secret!)
+    const decoded = jwt.verify(token, jwtSecret);
+
+    // Supabase JWT stores user ID in sub claim
+    req.user = { id: decoded.sub, ...decoded };
+    next();
+  } catch (err) {
+    return res.status(401).json({ message: "Invalid or expired token" });
+  }
+};
 
 // Login route
 app.post("/api/login", async (req, res) => {
@@ -186,7 +182,7 @@ const upload = multer({
   },
 });
 
-// File upload route
+// Updated upload route: description required, file optional
 app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
   try {
     const { description } = req.body;
@@ -199,6 +195,7 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
     let file_url = null;
 
     if (file) {
+      // Sanity check: file extension must exist
       const fileExt = path.extname(file.originalname).toLowerCase();
       if (!fileExt) {
         return res.status(400).json({ message: "File extension missing or invalid" });
@@ -207,6 +204,7 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
       const fileName = `${uuidv4()}${fileExt}`;
       const bucket = "research-files";
 
+      // Upload file buffer to Supabase Storage
       const { error: uploadError } = await supabase.storage
         .from(bucket)
         .upload(fileName, file.buffer, {
@@ -219,6 +217,7 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
         return res.status(500).json({ message: "File upload failed" });
       }
 
+      // Get public URL (no error object here, but check anyway)
       const { data: publicUrlData, error: publicUrlError } = supabase.storage
         .from(bucket)
         .getPublicUrl(fileName);
@@ -231,6 +230,7 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
       file_url = publicUrlData.publicUrl;
     }
 
+    // Insert research record with or without file_url
     const { data, error } = await supabase
       .from("research")
       .insert({
@@ -246,6 +246,7 @@ app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
       return res.status(500).json({ message: "Research insert failed" });
     }
 
+    // Insert log entry
     await supabase.from("logs").insert({
       user_id: req.user.id,
       action: `Uploaded new research: ${description}`,
