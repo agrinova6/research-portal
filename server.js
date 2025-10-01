@@ -82,6 +82,24 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
+//Dev
+app.get("/api/dev-image", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .storage
+      .from("private-assets")
+      .createSignedUrl("dev.png", 3600);
+
+    if (error || !data?.signedUrl) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json({ signedUrl: data.signedUrl });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Get list of members
 app.get("/api/members", verifyAuth, async (req, res) => {
   try {
