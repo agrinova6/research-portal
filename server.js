@@ -13,7 +13,7 @@ app.use(cors({
 }));
 app.use(express.json());
 
-// ENV Vars
+// Environment variables
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_KEY;
 const supabaseAnonKey = process.env.SUPABASE_ANON_KEY;
@@ -22,10 +22,10 @@ if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
   throw new Error("SUPABASE_URL, SUPABASE_SERVICE_KEY or SUPABASE_ANON_KEY missing in env");
 }
 
-// Supabase admin client (service role)
+// Supabase client with service key (admin)
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
 
-// ✅ New Middleware to verify token using Supabase
+// Middleware to verify token using Supabase auth
 const verifyAuth = async (req, res, next) => {
   const authHeader = req.headers.authorization;
 
@@ -36,10 +36,7 @@ const verifyAuth = async (req, res, next) => {
   const token = authHeader.split(" ")[1];
 
   try {
-    const {
-      data: { user },
-      error,
-    } = await supabase.auth.getUser(token);
+    const { data: { user }, error } = await supabase.auth.getUser(token);
 
     if (error || !user) {
       return res.status(401).json({ message: "Invalid or expired token" });
@@ -140,7 +137,7 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
   }
 });
 
-// Add research record without file
+// Add research record without file (deprecated fallback)
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
     const { description, file_url } = req.body;
@@ -270,4 +267,56 @@ app.post("/api/log", verifyAuth, async (req, res) => {
     const { description, user_id } = req.body;
 
     if (!description || !user_id) {
-      return res.status(400).json({ message:
+      return res.status(400).json({ message: "Description and user_id are required" });
+    }
+
+    const newLog = { description, user_id };
+
+    const { data, error } = await supabase.from("logs").insert(newLog).select().single();
+    if (error) throw error;
+
+    res.status(201).json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get research records for user
+app.get("/api/research", verifyAuth, async (req, res) => {
+  try {
+    const user_id = req.query.user_id;
+    if (!user_id) {
+      return res.status(400).json({ message: "user_id query param is required" });
+    }
+
+    const { data, error } = await supabase
+      .from("research")
+      .select("id, description, file_url, created_at")
+      .eq("user_id", user_id)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get current user info
+app.get("/api/me", verifyAuth, async (req, res) => {
+  try {
+    const { id } = req.user;
+    const { data, error } = await supabase.from("profiles").select("id, name, email").eq("id", id).single();
+    if (error) throw error;
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start server
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`Backend listening on port ${port}`);
+});
