@@ -8,7 +8,10 @@ import { v4 as uuidv4 } from "uuid";
 import path from "path";
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['http://localhost:80', 'https://rescuevault-portal.netlify.app'],
+  credentials: true
+}));
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
