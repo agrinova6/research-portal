@@ -51,7 +51,7 @@ const verifyAuth = (req, res, next) => {
   }
 };
 
-// Login route: use Supabase Auth REST API to sign in user and get JWT
+// Login route
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -60,11 +60,10 @@ app.post("/api/login", async (req, res) => {
       return res.status(400).json({ message: "Email and password required" });
     }
 
-    // Using native fetch (Node 18+ required), else use node-fetch or axios
     const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
       method: "POST",
       headers: {
-        "apikey": supabaseAnonKey,
+        apikey: supabaseAnonKey,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ email, password }),
@@ -82,7 +81,6 @@ app.post("/api/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Return access token and user info to client
     res.json({ access_token: data.access_token, user: data.user });
   } catch (err) {
     console.error("Unexpected error in login:", err);
@@ -90,7 +88,7 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-// Get list of members (profiles)
+// Get list of members
 app.get("/api/members", verifyAuth, async (req, res) => {
   try {
     const { data, error } = await supabase.from("profiles").select("id, name");
@@ -101,7 +99,7 @@ app.get("/api/members", verifyAuth, async (req, res) => {
   }
 });
 
-// Get research summary for yesterday and today
+// Research summary
 app.get("/api/research-summary", verifyAuth, async (req, res) => {
   try {
     const { data: profiles, error: pErr } = await supabase.from("profiles").select("id, name");
@@ -135,7 +133,7 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
   }
 });
 
-// Add research record without file (deprecated, kept for fallback)
+// Add research record without file (deprecated fallback)
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
     const { description, file_url } = req.body;
@@ -159,10 +157,9 @@ app.post("/api/research", verifyAuth, async (req, res) => {
   }
 });
 
-// Multer setup for file uploads with memory storage and file size/type checks
+// Multer setup for memory storage and file validation
 const storage = multer.memoryStorage();
 
-// Accept only certain file types (e.g., PDFs, images, docs)
 const allowedMimeTypes = [
   "application/pdf",
   "image/jpeg",
@@ -170,12 +167,12 @@ const allowedMimeTypes = [
   "image/gif",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  "text/plain"
+  "text/plain",
 ];
 
 const upload = multer({
   storage,
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10 MB limit
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB max
   fileFilter: (req, file, cb) => {
     if (allowedMimeTypes.includes(file.mimetype)) {
       cb(null, true);
@@ -185,63 +182,71 @@ const upload = multer({
   },
 });
 
+// Updated upload route: description required, file optional
 app.post("/api/upload", verifyAuth, upload.single("file"), async (req, res) => {
   try {
     const { description } = req.body;
     const file = req.file;
 
-    if (!description || !file) {
-      return res.status(400).json({ message: "Description and file are required" });
+    if (!description || description.trim() === "") {
+      return res.status(400).json({ message: "Description is required" });
     }
 
-    // Ensure file extension matches mimetype as a sanity check
-    const fileExt = path.extname(file.originalname).toLowerCase();
-    if (!fileExt) {
-      return res.status(400).json({ message: "File extension missing or invalid" });
+    let file_url = null;
+
+    if (file) {
+      // Sanity check: file extension must exist
+      const fileExt = path.extname(file.originalname).toLowerCase();
+      if (!fileExt) {
+        return res.status(400).json({ message: "File extension missing or invalid" });
+      }
+
+      const fileName = `${uuidv4()}${fileExt}`;
+      const bucket = "research-files";
+
+      // Upload file buffer to Supabase Storage
+      const { error: uploadError } = await supabase.storage
+        .from(bucket)
+        .upload(fileName, file.buffer, {
+          contentType: file.mimetype,
+          upsert: false,
+        });
+
+      if (uploadError) {
+        console.error("Upload error:", uploadError);
+        return res.status(500).json({ message: "File upload failed" });
+      }
+
+      // Get public URL (no error object here, but check anyway)
+      const { data: publicUrlData, error: publicUrlError } = supabase.storage
+        .from(bucket)
+        .getPublicUrl(fileName);
+
+      if (publicUrlError) {
+        console.error("Error getting public URL:", publicUrlError);
+        return res.status(500).json({ message: "Failed to get public file URL" });
+      }
+
+      file_url = publicUrlData.publicUrl;
     }
 
-    const fileName = `${uuidv4()}${fileExt}`;
-    const bucket = "research-files";
-
-    // Upload file to Supabase Storage
-    const { error: uploadError } = await supabase.storage
-      .from(bucket)
-      .upload(fileName, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      });
-
-    if (uploadError) {
-      console.error("Upload error:", uploadError);
-      return res.status(500).json({ message: "File upload failed" });
-    }
-
-    // Get public URL
-    const { data: publicUrlData, error: publicUrlError } = supabase
-      .storage
-      .from(bucket)
-      .getPublicUrl(fileName);
-
-    if (publicUrlError) {
-      console.error("Error getting public URL:", publicUrlError);
-      return res.status(500).json({ message: "Failed to get public file URL" });
-    }
-
-    const file_url = publicUrlData.publicUrl;
-
-    // Save research record with uploaded file URL
-    const { data, error } = await supabase.from("research").insert({
-      description,
-      file_url,
-      user_id: req.user.id,
-    }).select().single();
+    // Insert research record with or without file_url
+    const { data, error } = await supabase
+      .from("research")
+      .insert({
+        description,
+        file_url,
+        user_id: req.user.id,
+      })
+      .select()
+      .single();
 
     if (error) {
       console.error("DB insert error:", error);
       return res.status(500).json({ message: "Research insert failed" });
     }
 
-    // Add to logs
+    // Insert log entry
     await supabase.from("logs").insert({
       user_id: req.user.id,
       action: `Uploaded new research: ${description}`,
@@ -277,7 +282,7 @@ app.post("/api/log", verifyAuth, async (req, res) => {
   }
 });
 
-// Get all research for a specific user
+// Get research records for user
 app.get("/api/research", verifyAuth, async (req, res) => {
   try {
     const user_id = req.query.user_id;
@@ -299,7 +304,7 @@ app.get("/api/research", verifyAuth, async (req, res) => {
   }
 });
 
-// Optional: Endpoint to verify token & return current user info
+// Get current user info
 app.get("/api/me", verifyAuth, async (req, res) => {
   try {
     const { id } = req.user;
