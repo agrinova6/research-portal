@@ -5,7 +5,10 @@ import jwt from "jsonwebtoken";
 import dayjs from "dayjs";
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: ['https://rescuevault-portal.netlify.app'],
+  credentials: true
+}));
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -19,16 +22,10 @@ if (!supabaseUrl || !supabaseServiceKey || !supabaseAnonKey) {
 if (!jwtSecret) {
   throw new Error("JWT_SECRET is not defined in environment variables");
 }
-
-// Supabase admin client (service role)
 const supabase = createClient(supabaseUrl, supabaseServiceKey);
-
-// Expose anon key + URL for frontend
 app.get("/api/anon-key", (req, res) => {
   res.json({ anonKey: supabaseAnonKey, supabaseUrl });
 });
-
-// Middleware to verify JWT from Supabase
 const verifyAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -44,8 +41,6 @@ const verifyAuth = (req, res, next) => {
     return res.status(401).json({ message: "Invalid or expired token" });
   }
 };
-
-// Login route
 app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -82,7 +77,6 @@ app.post("/api/login", async (req, res) => {
   }
 });
 
-//Dev
 app.get("/api/dev-image", async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -100,7 +94,6 @@ app.get("/api/dev-image", async (req, res) => {
   }
 });
 
-// Get list of members
 app.get("/api/members", verifyAuth, async (req, res) => {
   try {
     const { data, error } = await supabase.from("profiles").select("id, name");
@@ -110,8 +103,6 @@ app.get("/api/members", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Research summary
 app.get("/api/research-summary", verifyAuth, async (req, res) => {
   try {
     const { data: profiles, error: pErr } = await supabase.from("profiles").select("id, name");
@@ -144,8 +135,6 @@ app.get("/api/research-summary", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Upload research (text-only, no file)
 app.post("/api/research", verifyAuth, async (req, res) => {
   try {
     const { description } = req.body;
@@ -168,8 +157,6 @@ app.post("/api/research", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Get research records for user
 app.get("/api/research", verifyAuth, async (req, res) => {
   try {
     const user_id = req.query.user_id;
@@ -190,8 +177,6 @@ app.get("/api/research", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Get current user info
 app.get("/api/me", verifyAuth, async (req, res) => {
   try {
     const { id } = req.user;
@@ -207,8 +192,6 @@ app.get("/api/me", verifyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-
-// Start server
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`Backend listening on port ${port}`);
